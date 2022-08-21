@@ -91,14 +91,14 @@ public class TransportRollupAction extends AcknowledgedTransportMasterNodeAction
     /**
      * This is the cluster state task executor for cluster state update actions.
      */
-    private static final ClusterStateTaskExecutor<RollupClusterStateUpdateTask> STATE_UPDATE_TASK_EXECUTOR = (
-        currentState,
-        taskContexts) -> {
-        ClusterState state = currentState;
-        for (final var taskContext : taskContexts) {
+    private static final ClusterStateTaskExecutor<RollupClusterStateUpdateTask> STATE_UPDATE_TASK_EXECUTOR = batchExecutionContext -> {
+        ClusterState state = batchExecutionContext.initialState();
+        for (final var taskContext : batchExecutionContext.taskContexts()) {
             try {
                 final var task = taskContext.getTask();
-                state = task.execute(state);
+                try (var ignored = taskContext.captureResponseHeaders()) {
+                    state = task.execute(state);
+                }
                 taskContext.success(() -> task.listener.onResponse(AcknowledgedResponse.TRUE));
             } catch (Exception e) {
                 taskContext.onFailure(e);
@@ -266,6 +266,14 @@ public class TransportRollupAction extends AcknowledgedTransportMasterNodeAction
                             // Number of replicas had been previously set to 0 to speed up index population
                             if (sourceIndexMetadata.getNumberOfReplicas() > 0) {
                                 settings.put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, sourceIndexMetadata.getNumberOfReplicas());
+                            }
+                            // Setting index.hidden has been initially set to true. We revert this to the value of the source index
+                            if (sourceIndexMetadata.isHidden() == false) {
+                                if (sourceIndexMetadata.getSettings().keySet().contains(IndexMetadata.SETTING_INDEX_HIDDEN)) {
+                                    settings.put(IndexMetadata.SETTING_INDEX_HIDDEN, false);
+                                } else {
+                                    settings.putNull(IndexMetadata.SETTING_INDEX_HIDDEN);
+                                }
                             }
                             UpdateSettingsRequest updateSettingsReq = new UpdateSettingsRequest(settings.build(), rollupIndexName);
                             updateSettingsReq.setParentTask(parentTask);
@@ -483,8 +491,10 @@ public class TransportRollupAction extends AcknowledgedTransportMasterNodeAction
                 // the same rules with resize apply
                 continue;
             }
-            // do not override settings that have already been set in the rollup index
-            if (targetSettings.keys().contains(key)) {
+            // Do not override settings that have already been set in the rollup index.
+            // Also, we don't want to copy the `index.block.write` setting that we know
+            // it is set in the source index settings.
+            if (IndexMetadata.SETTING_BLOCKS_WRITE.equals(key) || targetSettings.keys().contains(key)) {
                 continue;
             }
             targetSettings.copy(key, sourceIndexMetadata.getSettings());
@@ -543,7 +553,7 @@ public class TransportRollupAction extends AcknowledgedTransportMasterNodeAction
              * case rollup will fail.
              */
             Settings.builder()
-                .put(IndexMetadata.INDEX_HIDDEN_SETTING.getKey(), true)
+                .put(IndexMetadata.SETTING_INDEX_HIDDEN, true)
                 .put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, sourceIndexMetadata.getNumberOfShards())
                 .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 0)
                 .put(IndexSettings.INDEX_REFRESH_INTERVAL_SETTING.getKey(), "-1")
@@ -626,7 +636,7 @@ public class TransportRollupAction extends AcknowledgedTransportMasterNodeAction
 
             @Override
             public void onFailure(Exception deleteException) {
-                listener.onFailure(new ElasticsearchException("Unable to delete the temporary rollup index [" + rollupIndex + "]", e));
+                listener.onFailure(new ElasticsearchException("Unable to delete rollup index [" + rollupIndex + "]", e));
             }
         });
     }
@@ -647,11 +657,6 @@ public class TransportRollupAction extends AcknowledgedTransportMasterNodeAction
         @Override
         public void onFailure(Exception e) {
             listener.onFailure(e);
-        }
-
-        @Override
-        public void clusterStateProcessed(ClusterState oldState, ClusterState newState) {
-            assert false : "not called";
         }
     }
 }

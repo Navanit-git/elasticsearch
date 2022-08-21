@@ -7,6 +7,7 @@
 
 package org.elasticsearch.xpack.constantkeyword.mapper;
 
+import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.TermsEnum;
 import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.search.MatchNoDocsQuery;
@@ -24,6 +25,7 @@ import org.elasticsearch.common.regex.Regex;
 import org.elasticsearch.common.time.DateMathParser;
 import org.elasticsearch.common.unit.Fuzziness;
 import org.elasticsearch.index.fielddata.FieldData;
+import org.elasticsearch.index.fielddata.FieldDataContext;
 import org.elasticsearch.index.fielddata.IndexFieldData;
 import org.elasticsearch.index.fielddata.plain.ConstantIndexFieldData;
 import org.elasticsearch.index.mapper.ConstantFieldType;
@@ -38,7 +40,6 @@ import org.elasticsearch.index.mapper.SourceLoader;
 import org.elasticsearch.index.mapper.ValueFetcher;
 import org.elasticsearch.index.query.SearchExecutionContext;
 import org.elasticsearch.search.aggregations.support.CoreValuesSourceType;
-import org.elasticsearch.search.lookup.SearchLookup;
 import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xpack.constantkeyword.ConstantKeywordDocValuesField;
@@ -51,7 +52,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
-import java.util.function.Supplier;
+import java.util.stream.Stream;
 
 /**
  * A {@link FieldMapper} that assigns every document the same value.
@@ -132,7 +133,7 @@ public class ConstantKeywordFieldMapper extends FieldMapper {
         }
 
         @Override
-        public IndexFieldData.Builder fielddataBuilder(String fullyQualifiedIndexName, Supplier<SearchLookup> searchLookup) {
+        public IndexFieldData.Builder fielddataBuilder(FieldDataContext fieldDataContext) {
             return new ConstantIndexFieldData.Builder(
                 value,
                 name(),
@@ -310,15 +311,25 @@ public class ConstantKeywordFieldMapper extends FieldMapper {
 
     @Override
     public SourceLoader.SyntheticFieldLoader syntheticFieldLoader() {
-        return (reader, docIdsInLeaf) -> new SourceLoader.SyntheticFieldLoader.Leaf() {
+        return new SourceLoader.SyntheticFieldLoader() {
             @Override
-            public boolean empty() {
-                return fieldType().value == null;
+            public Stream<Map.Entry<String, StoredFieldLoader>> storedFieldLoaders() {
+                return Stream.of();
             }
 
             @Override
-            public boolean advanceToDoc(int docId) throws IOException {
-                return fieldType().value != null;
+            public DocValuesLoader docValuesLoader(LeafReader reader, int[] docIdsInLeaf) {
+                /*
+                 * If there is a value we need to enable objects containing these
+                 * fields. We could build something special for fields that are
+                 * always "on", but constant_keyword fields are rare enough that
+                 * having an extra doc values loader that always returns `true`
+                 * isn't a big performance hit and gets the job done.
+                 */
+                if (fieldType().value == null) {
+                    return null;
+                }
+                return docId -> true;
             }
 
             @Override
